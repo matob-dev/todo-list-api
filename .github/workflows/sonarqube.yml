@@ -1,0 +1,68 @@
+name: SAST - SonarQube
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sonar-sast:
+    name: Análise SAST
+    runs-on: ubuntu-latest
+    services:
+      sonarqube:
+        image: sonarqube:community
+        ports:
+          - 9000:9000
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Executar testes com cobertura
+        run: npm test -- --runInBand
+
+      - name: Preparar SonarQube efêmero
+        run: |
+          for attempt in {1..60}; do
+            status=$(curl --silent http://localhost:9000/api/system/status | jq --raw-output '.status // empty')
+            if [ "$status" = 'UP' ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          test "${status:-}" = 'UP' || { echo 'SonarQube não ficou disponível a tempo.'; exit 1; }
+
+          curl --fail --silent --user admin:admin --request POST \
+            --data-urlencode 'project=todo-list' \
+            --data-urlencode 'name=Todo List API' \
+            http://localhost:9000/api/projects/create
+
+          sonar_token=$(curl --fail --silent --user admin:admin --request POST \
+            --data-urlencode "name=github-actions-${GITHUB_RUN_ID}" \
+            http://localhost:9000/api/user_tokens/generate | jq --raw-output '.token')
+          test -n "$sonar_token" && test "$sonar_token" != 'null' || { echo 'Não foi possível gerar o token temporário.'; exit 1; }
+          echo "::add-mask::$sonar_token"
+          echo "SONAR_TOKEN=$sonar_token" >> "$GITHUB_ENV"
+
+      - name: Enviar análise ao SonarQube
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_HOST_URL: http://localhost:9000
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
